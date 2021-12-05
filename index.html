@@ -7,21 +7,58 @@
 
 <script>
 var gl;
+var projection;
 var shaderProgram;
 var modelview_uniform;
 var normal_uniform;
 var projection_uniform;
-var texture, texture2;
+var camera_uniform;
+var texture_matrix_uniform;
+var texture, texture2, depthTexture;
 var sampler_uniform;
 var sampler2_uniform;
+var sampler3_uniform;
 var teapot_vao;
 var vert_pos_attr;
 var vert_normal_attr;
+var sphere_fases;
+var sphere_pos;
+var lightWorldMatrix;
+var lightProjectionMatrix;
+var depthFramebuffer;
 
-//
+var lightModelViewMatrix_uniform;
+var projectiondepth_uniform;
+var vert_pos_depth_attr;
+
+
 // a default vertex shader implemented as a backquoted string variable
 //
 
+var vsd = `#version 300 es
+
+uniform mat4 uProjectionMatrix;
+uniform mat4 uModelViewMatrix;
+in vec3 aVertexPosition;
+
+void main() {
+  
+  gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(aVertexPosition,1.0);
+}
+`;
+
+var fsd = `#version 300 es
+
+
+precision mediump float;
+out vec4 outColor;
+
+void main() {
+  
+ outColor = vec4(0,0,0,0);
+}
+
+`;
 var vs = `#version 300 es
 
 in vec3 aVertexPosition;
@@ -31,15 +68,25 @@ in vec2 aTexCoord;
 uniform mat4 uModelViewMatrix;
 uniform mat3 uNormalMatrix;
 uniform mat4 uProjectionMatrix;
+uniform mat4 uCameraMatrix;
+uniform mat4 uTexturematrix;
 
 out vec2 vTexCoord;
 out vec3 vNormal;
+out vec3 vPosition;
+out vec3 normal;
+out vec4 modelViewPosition;
+out vec4 v_projectedTexcoord;
 
 void main() {
-  vTexCoord.s = aVertexPosition.x + 0.5;
-  vTexCoord.t = aVertexPosition.y + 0.5;
-
-  gl_Position = uProjectionMatrix*uModelViewMatrix*vec4(aVertexPosition, 1.0);
+  //vTexCoord.s = aVertexPosition.x + 0.5;
+  //vTexCoord.t = aVertexPosition.y + 0.5;
+  vPosition = aVertexPosition;
+  normal = uNormalMatrix*aVertexNormal;
+   modelViewPosition = uModelViewMatrix*vec4(aVertexPosition, 1.0);
+  gl_Position = uProjectionMatrix*modelViewPosition;
+  v_projectedTexcoord = uTexturematrix  * uModelViewMatrix * vec4(aVertexPosition,1.0);
+  
 }
 `;
 
@@ -52,17 +99,85 @@ var fs = `#version 300 es
 precision mediump float;
     
 in vec3 vNormal;
+in vec3 vPosition;
+in vec3 normal;
 in vec2 vTexCoord;
+in vec4 v_projectedTexcoord;
+in vec4 modelViewPosition;
 uniform sampler2D uSampler;
 uniform sampler2D uSampler2;
-
+uniform sampler2D uSampler3;
+uniform sampler2D depthBuffer;
+uniform float flag;
 out vec4 outColor;
     
 void main() {
-  vec3 illinois = vec3(texture(uSampler, vTexCoord));
-  vec3 stadium = vec3(texture(uSampler2, vTexCoord));
-  vec3 c = 0.5*illinois + 0.5*stadium;
 
+ vec3 c;
+ vec3 projectedTexCoord;
+  projectedTexCoord = v_projectedTexcoord.xyz / v_projectedTexcoord.w;
+ float currentDepth = projectedTexCoord.z;
+ float projectedDepth = texture(depthBuffer, projectedTexCoord.xy).r;
+  bool inRange =
+      projectedTexCoord.x >= 0.0 &&
+      projectedTexCoord.x <= 1.0 &&
+      projectedTexCoord.y >= 0.0 &&
+      projectedTexCoord.y <= 1.0;
+ float shadowLight = (inRange  && projectedDepth <= currentDepth ) ? 0.5 : 1.0;
+ 	  
+	  
+  vec3 light = vec3(0,0,1); //light pos
+  vec2 illinoisTexCoord;
+  illinoisTexCoord.s = -((atan(vPosition.z, vPosition.x))/(2.0*3.14159));//(atan2(vPosition.y,vPosition.x))/2.0*3.14159;
+  illinoisTexCoord.t = (vPosition.y + 0.3)/0.55;
+  vec3 illinois = vec3(texture(uSampler, illinoisTexCoord));
+   light = normalize(light - modelViewPosition.xyz);
+
+  
+  vec3 tangent = vec3(1.0,0.0,0.0);
+  vec3 binormal = cross(normalize(normal),tangent);
+  float bm0, bmUp, bmRight,bumpFactor;
+  bm0 = texture(uSampler3, illinoisTexCoord).r;
+  bmUp = texture(uSampler3, illinoisTexCoord + vec2(0, 1.0/512.0) ).r;
+  bmRight = texture(uSampler3, illinoisTexCoord + vec2(1.0/512.0 , 0) ).r;
+  
+  bumpFactor = 2.0;
+  
+   if(flag == 0.0){
+     bumpFactor = 0.0;
+     //baseColor = vec3(normalize(vPosition).x , normalize(vPosition).y, normalize(vPosition).z)* 3.5 ;
+  }
+  vec3 newNormal;
+  vec3 bumpVector = (bmRight - bm0)*tangent + (bmUp - bm0)*binormal;
+  newNormal = normalize(normal + (bumpFactor * bumpVector));
+  vec3 r = reflect(-light,newNormal); //
+  
+  
+  vec2 stadiumTexCoord = (newNormal.xy + 1.0)/2.0;
+  vec3 stadium = vec3(texture(uSampler2, stadiumTexCoord));
+  vec3 modelViewPositionNorm = normalize(-modelViewPosition.xyz);
+  //vec3 c = 0.5 * stadium * .5 * illinois;
+
+ 
+  vec3 diffuseColor, specColor;
+  float kd,ks,shininess;
+  kd = .5;
+  ks = .5;
+  shininess = 115.0;
+  diffuseColor = vec3(1.0,1.0,1.0);
+  specColor = vec3(1.0,1.0,1.0);
+  vec3 baseColor = stadium +  illinois;
+  if(flag == 0.0){
+     vec3 procedureColor = normalize(vPosition + vec3(1,1,1));
+     baseColor = procedureColor * 2.5;
+  }
+  vec3 diffuseLighting =  kd * max(dot(newNormal, light), 0.0) * diffuseColor;
+  vec3 specLighting = ks * pow(max(dot(r, modelViewPositionNorm), 0.0), shininess) * specColor;
+  c = (baseColor) * (diffuseLighting + specLighting); 
+  c = 1.0 * c;
+ 
+
+    
   outColor = vec4(c,1.0);
 }
 `;
@@ -79,26 +194,83 @@ function initwebgl() {
   gl = canvas.getContext("webgl2");
   if (!gl)
     alert("Failed to create WebGL context!");
-
+  //const ext = gl.getExtension('WEBGL_depth_texture');
+  //if (!ext) {
+   // alert('need WEBGL_depth_texture');  
+  //}
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
-  loadshaders(vs,fs);
+  loadshaders(vs,fs,vsd,fsd);
 
-  // set up vertex array object
- 
-  teapot_vao = gl.createVertexArray();
-  gl.bindVertexArray(teapot_vao);
 
-  // create a coordinate buffer of vertex positions and
-  // connect it to the vertex shader positions
- 
-  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-  gl.bufferData(gl.ARRAY_BUFFER,
-                new Float32Array(teapot.positions),
-                gl.STATIC_DRAW);
+/**
+Create DEPTH BUFFER and unused texture buffer
 
-  gl.enableVertexAttribArray(vert_pos_attr);
-  gl.vertexAttribPointer(vert_pos_attr, 3, gl.FLOAT, false, 0, 0);
+**/
+
+depthTexture = gl.createTexture();
+  const depthTextureSize = 512;
+  gl.bindTexture(gl.TEXTURE_2D, depthTexture);
+  gl.texImage2D(
+      gl.TEXTURE_2D,      // target
+      0,                  // mip level
+      gl.DEPTH_COMPONENT, // internal format
+      depthTextureSize,   // width
+      depthTextureSize,   // height
+      0,                  // border
+      gl.DEPTH_COMPONENT, // format
+      gl.UNSIGNED_INT,    // type
+      null);              // data
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+   depthFramebuffer = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, depthFramebuffer);
+  gl.framebufferTexture2D(
+      gl.FRAMEBUFFER,       // target
+      gl.DEPTH_ATTACHMENT,  // attachment point
+      gl.TEXTURE_2D,        // texture target
+      depthTexture,         // texture
+      0);                   // mip level
+  
+  
+var sampler4 = gl.createSampler();
+  gl.bindSampler(3, sampler4);
+
+  // create a color texture of the same size as the depth texture
+  // see article why this is needed_
+  const unusedTexture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, unusedTexture);
+  gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      depthTextureSize,
+      depthTextureSize,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      null,
+  );
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  // attach it to the framebuffer
+  gl.framebufferTexture2D(
+      gl.FRAMEBUFFER,        // target
+      gl.COLOR_ATTACHMENT0,  // attachment point
+      gl.TEXTURE_2D,         // texture target
+      unusedTexture,         // texture
+      0);                    // mip level
+
+
+
+
+
 
   // create a coordinate buffer of vertex positions and
   // connect it to the vertex shader positions
@@ -118,20 +290,34 @@ function initwebgl() {
     
   }
 
-  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-  gl.bufferData(gl.ARRAY_BUFFER,
-                new Float32Array(teapot.normals),
-                gl.STATIC_DRAW);
+sphere_pos = new Array(12*12*3);
 
-  gl.enableVertexAttribArray(vert_normal_attr);
-  gl.vertexAttribPointer(vert_normal_attr, 3, gl.FLOAT, false, 0, 0);
+  var phi,theta;
 
-  // create an index buffer of triangle faces
+  for (var j = 0; j < 12; j++) {
+    phi = j*Math.PI/11.0 - Math.PI/2.0;
+    for (var i = 0; i < 12; i++) {
+      theta = i*2.0*Math.PI/11.0;
+      sphere_pos[12*3*j + 3*i    ] = Math.cos(phi)*Math.cos(theta);
+      sphere_pos[12*3*j + 3*i + 1] = Math.sin(phi);
+      sphere_pos[12*3*j + 3*i + 2] = Math.cos(phi)*Math.sin(theta);
+    }
+  }
 
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer()); 
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,
-                new Uint16Array(teapot.faces),
-                gl.STATIC_DRAW);
+
+sphere_faces = new Array(11*12*2);
+
+  for (var j = 0; j < 11; j++) {
+    for (var i = 0; i < 11; i++) {
+      sphere_faces[6*12*j + 6*i    ] = 12*j + i;
+      sphere_faces[6*12*j + 6*i + 1] = 12*(j+1) + i;
+      sphere_faces[6*12*j + 6*i + 2] = 12*(j+1) + (i+1);
+      sphere_faces[6*12*j + 6*i + 3] = 12*j + i;
+      sphere_faces[6*12*j + 6*i + 4] = 12*(j+1) + (i+1);
+      sphere_faces[6*12*j + 6*i + 5] = 12*j + (i+1);
+    }
+  }
+  
 
   //
   // set up texture and sampler
@@ -188,18 +374,89 @@ function initwebgl() {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 256, 0, gl.RGBA, gl.UNSIGNED_BYTE, image2);
     gl.generateMipmap(gl.TEXTURE_2D);
   });
+  
+  
+
+
+  //SET UP BUMP TEXTURE0
+  //
+  // set up second texture and sampler
+  //
+
+  texture3 = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture3);
+
+  var sampler3 = gl.createSampler();
+  gl.bindSampler(2, sampler3);
+
+  //
+  // load texture image using webgl2fundamentals boilerplate
+  // initially creates just a 1x1 blue pixel as a placeholder
+  // replaced by actual texture image once loaded
+  //
+
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA,
+                gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 255, 255]));
+
+  var image3 = new Image();
+  image3.src = "illinois512bump.png";
+
+  image3.addEventListener("load", function() {
+    gl.bindTexture(gl.TEXTURE_2D, texture3);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 512, 512, 0, gl.RGBA, gl.UNSIGNED_BYTE, image3);
+    gl.generateMipmap(gl.TEXTURE_2D);
+  });
+  
+
+  //END SET UP BUMP TEXTURE0
+
+
+
 
   //
   // set up transformation matrices
-  //
+  //-1.5,-1.5,1
 
   projection = glMatrix.mat4.create();
-  glMatrix.mat4.perspective(projection, Math.PI/6, 1.0, 0.1);
+  glMatrix.mat4.perspective(projection, Math.PI/4.5, 1.0, 0.1);
+  lightModelViewMatrix = glMatrix.mat4.create();
+  lightProjectionMatrix = glMatrix.mat4.create();
 
+
+ glMatrix.mat4.lookAt(lightModelViewMatrix,
+        [0,0,1],          // position
+        [0,0,-6], // target
+        [0, 1, 0],                                              // up
+    );
+	
+  glMatrix.mat4.invert(lightModelViewMatrix, lightModelViewMatrix);
+  
+  glMatrix.mat4.perspective(lightProjectionMatrix, Math.PI/2, 1.0, .1)
+  
+  
+  textureMatrix = glMatrix.mat4.create();
+  glMatrix.mat4.identity(textureMatrix);
+  glMatrix.mat4.translate(textureMatrix,textureMatrix,[0.5, 0.5, .5]);
+  glMatrix.mat4.scale(textureMatrix,textureMatrix,[0.5, 0.5, .5]);
+  glMatrix.mat4.multiply(textureMatrix,textureMatrix,lightProjectionMatrix);
+  Inverse_LightModelViewMatrix = glMatrix.mat4.create();
+   glMatrix.mat4.invert(Inverse_LightModelViewMatrix,lightModelViewMatrix);
+  glMatrix.mat4.multiply(textureMatrix,textureMatrix,Inverse_LightModelViewMatrix);
+  
+  
+  cameraMatrix = glMatrix.mat4.create();
+  glMatrix.mat4.lookAt(cameraMatrix,
+        [0,0,1],          // position
+        [0,0,0], // target
+        [0, 1, 0],                                              // up
+    );
+ glMatrix.mat4.invert(cameraMatrix, cameraMatrix);	
+  
+  
   requestAnimationFrame(draw);
 }
 
-function loadshaders(vertexShaderSource,fragmentShaderSource) {
+function loadshaders(vertexShaderSource,fragmentShaderSource,vertexShaderDepthSource,fragmentShaderDepthSource) {
   var vstextbox = document.getElementById("vertexshader");
 
   var vertexShader = gl.createShader(gl.VERTEX_SHADER);
@@ -232,8 +489,36 @@ function loadshaders(vertexShaderSource,fragmentShaderSource) {
   modelview_uniform = gl.getUniformLocation(shaderProgram, "uModelViewMatrix"); 
   normal_uniform = gl.getUniformLocation(shaderProgram, "uNormalMatrix"); 
   projection_uniform = gl.getUniformLocation(shaderProgram, "uProjectionMatrix"); 
+  camera_uniform = gl.getUniformLocation(shaderProgram, "uCameraMatrix"); 
+  texture_matrix_uniform =  gl.getUniformLocation(shaderProgram, "uTexturematrix"); 
   sampler_uniform = gl.getUniformLocation(shaderProgram, "uSampler"); 
   sampler2_uniform = gl.getUniformLocation(shaderProgram, "uSampler2"); 
+  sampler3_uniform = gl.getUniformLocation(shaderProgram, "uSampler3"); 
+  depthBuff = gl.getUniformLocation(shaderProgram, "depthBuffer"); 
+  flag = gl.getUniformLocation(shaderProgram, "flag"); 
+  
+  
+  var vertexShaderDepth = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vertexShaderDepth, vertexShaderDepthSource);
+  gl.compileShader(vertexShaderDepth);
+  if (!gl.getShaderParameter(vertexShaderDepth, gl.COMPILE_STATUS))
+    alert("Vertex Shader Depth Error:\n" + gl.getShaderInfoLog(vertexShaderDepth));
+  
+   var fragmentShaderDepth = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fragmentShaderDepth, fragmentShaderDepthSource);
+  gl.compileShader(fragmentShaderDepth);
+  if (!gl.getShaderParameter(fragmentShaderDepth, gl.COMPILE_STATUS))
+    alert("Fragment Shader de Error:\n" + gl.getShaderInfoLog(fragmentShaderDepth));
+  
+   depthProgram = gl.createProgram();
+  gl.attachShader(depthProgram, vertexShaderDepth);
+  gl.attachShader(depthProgram, fragmentShaderDepth);
+  gl.linkProgram(depthProgram);
+  if (!gl.getProgramParameter(depthProgram, gl.LINK_STATUS))
+    alert("Failed to setup shaders");
+	lightModelViewMatrix_uniform = gl.getUniformLocation(depthProgram, "uModelViewMatrix"); 
+  projectiondepth_uniform = gl.getUniformLocation(depthProgram, "uProjectionMatrix");  
+  vert_pos_depth_attr = gl.getAttribLocation(depthProgram, "aVertexPosition");
 }
 
 //
@@ -247,32 +532,241 @@ function draw(time) {
   gl.depthFunc(gl.LEQUAL);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
+
+  modelviewTeapot = glMatrix.mat4.create();
+  glMatrix.mat4.translate(modelviewTeapot,modelviewTeapot,[0.0, 0.0, -2.0]);
+  glMatrix.mat4.rotateY(modelviewTeapot,modelviewTeapot, time*0.001);
+normalmatrixTeapot = glMatrix.mat3.create();
+  glMatrix.mat3.normalFromMat4(normalmatrixTeapot,modelviewTeapot);
+
+
+
+  modelviewSphere = glMatrix.mat4.create();
+  glMatrix.mat4.translate(modelviewSphere,modelviewSphere,[1, 1, -6]);
+  glMatrix.mat4.scale(modelviewSphere,modelviewSphere,[1,1,1]);
+  normalmatrixSphere = glMatrix.mat3.create();
+  glMatrix.mat3.normalFromMat4(normalmatrixSphere,modelviewSphere);
+
+
+ gl.bindFramebuffer(gl.FRAMEBUFFER, depthFramebuffer);
+    gl.viewport(0, 0, 512, 512);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+
+   gl.useProgram(depthProgram);
+    
+  gl.uniformMatrix4fv(projectiondepth_uniform, false, lightProjectionMatrix);
+  
+  TeapotDepthModelView = glMatrix.mat4.create();
+  glMatrix.mat4.multiply(TeapotDepthModelView, lightModelViewMatrix, modelviewTeapot);
+  gl.uniformMatrix4fv(lightModelViewMatrix_uniform, false, TeapotDepthModelView);
+
+
+  /**
+         Teapot
+  **/
+  teapot_vao = gl.createVertexArray();
+  gl.bindVertexArray(teapot_vao);
+
+  // create a coordinate buffer of vertex positions and
+  // connect it to the vertex shader positions
+ 
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,
+                new Float32Array(teapot.positions),
+                gl.STATIC_DRAW);
+
+  gl.enableVertexAttribArray(vert_pos_depth_attr);
+  gl.vertexAttribPointer(vert_pos_depth_attr, 3, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,
+                new Float32Array(teapot.normals),
+                gl.STATIC_DRAW);
+
+  //gl.enableVertexAttribArray(vert_normal_attr);
+  //gl.vertexAttribPointer(vert_normal_attr, 3, gl.FLOAT, false, 0, 0);
+
+  // create an index buffer of triangle faces
+
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer()); 
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,
+                new Uint16Array(teapot.faces),
+                gl.STATIC_DRAW);
+   gl.drawElements(gl.TRIANGLES,
+                  teapot.faces.length,
+                  gl.UNSIGNED_SHORT,
+                  0);
+
+				  
+	   /**
+         SPHERE
+    **/			  
+
+  SphereDepthModelView = glMatrix.mat4.create();
+  glMatrix.mat4.multiply(SphereDepthModelView, lightModelViewMatrix, modelviewSphere);	
+gl.uniformMatrix4fv(lightModelViewMatrix_uniform, false, SphereDepthModelView);
+
+
+	
+	var sphere_vao = gl.createVertexArray();
+  gl.bindVertexArray(sphere_vao);
+	gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,
+                new Float32Array(sphere_pos),
+                gl.STATIC_DRAW);
+
+  gl.enableVertexAttribArray(vert_pos_depth_attr);
+  gl.vertexAttribPointer(vert_pos_depth_attr, 3, gl.FLOAT, false, 0, 0);
+  
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,
+                new Float32Array(sphere_pos),
+                gl.STATIC_DRAW);
+
+  //gl.enableVertexAttribArray(vert_normal_attr);
+  //gl.vertexAttribPointer(vert_normal_attr, 3, gl.FLOAT, false, 0, 0);
+
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer()); 
+
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,
+                new Uint16Array(sphere_faces),
+                gl.STATIC_DRAW);  
+
+
+    gl.drawElements(gl.TRIANGLES,
+                    sphere_faces.length,
+                    gl.UNSIGNED_SHORT,
+                    0);
+  
+  
+  
+  
+  
+  
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.viewport(0, 0, 1000, 1000);
+	
+	
+  gl.useProgram(shaderProgram);
+
+  gl.uniformMatrix4fv(modelview_uniform, false, modelviewTeapot);
+  gl.uniformMatrix3fv(normal_uniform, false, normalmatrixTeapot);
+  gl.uniformMatrix4fv(projection_uniform, false, projection);
+  gl.uniformMatrix4fv(camera_uniform, false, cameraMatrix);
+  gl.uniformMatrix4fv(texture_matrix_uniform, false, textureMatrix);
+  gl.uniform1f(flag,0.0);
+
+  gl.uniform1i(sampler_uniform,0);
+  gl.uniform1i(sampler2_uniform,1);
+  gl.uniform1i(sampler3_uniform,2);
+  gl.uniform1i(depthBuff,3);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, texture2);
+  gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_2D, texture3); 
+  gl.activeTexture(gl.TEXTURE3);
+  gl.bindTexture(gl.TEXTURE_2D, depthTexture); 
+
+ // gl.bindVertexArray(teapot_vao);
+
+  /**
+         Teapot
+  **/
+  
+  /**
   modelview = glMatrix.mat4.create();
   glMatrix.mat4.translate(modelview,modelview,[0.0, 0.0, -2.0]);
   glMatrix.mat4.rotateY(modelview,modelview, time*0.001);
 
   normalmatrix = glMatrix.mat3.create();
   glMatrix.mat3.normalFromMat4(normalmatrix,modelview);
-
-  gl.useProgram(shaderProgram);
-
-  gl.uniformMatrix4fv(modelview_uniform, false, modelview);
-  gl.uniformMatrix3fv(normal_uniform, false, normalmatrix);
-  gl.uniformMatrix4fv(projection_uniform, false, projection);
-
-  gl.uniform1i(sampler_uniform,0);
-  gl.uniform1i(sampler2_uniform,1);
-
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.activeTexture(gl.TEXTURE1);
-  gl.bindTexture(gl.TEXTURE_2D, texture2);
-
+  **/
+  
+  teapot_vao = gl.createVertexArray();
   gl.bindVertexArray(teapot_vao);
-  gl.drawElements(gl.TRIANGLES,
+   gl.uniform1f(flag,1.0);
+  // create a coordinate buffer of vertex positions and
+  // connect it to the vertex shader positions
+ 
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,
+                new Float32Array(teapot.positions),
+                gl.STATIC_DRAW);
+
+  gl.enableVertexAttribArray(vert_pos_attr);
+  gl.vertexAttribPointer(vert_pos_attr, 3, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,
+                new Float32Array(teapot.normals),
+                gl.STATIC_DRAW);
+
+  gl.enableVertexAttribArray(vert_normal_attr);
+  gl.vertexAttribPointer(vert_normal_attr, 3, gl.FLOAT, false, 0, 0);
+
+  // create an index buffer of triangle faces
+
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer()); 
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,
+                new Uint16Array(teapot.faces),
+                gl.STATIC_DRAW);
+   gl.drawElements(gl.TRIANGLES,
                   teapot.faces.length,
                   gl.UNSIGNED_SHORT,
                   0);
+
+				  
+	   /**
+         SPHERE
+    **/			  
+	gl.uniform1f(flag,0.0);
+	/**
+	  modelview = glMatrix.mat4.create();
+  glMatrix.mat4.translate(modelview,modelview,[.8, .9, -6]);
+  glMatrix.mat4.scale(modelview,modelview,[.5,.5,.5]);
+  normalmatrix = glMatrix.mat3.create();
+  glMatrix.mat3.normalFromMat4(normalmatrix,modelview);
+**/
+
+  gl.uniformMatrix4fv(modelview_uniform, false, modelviewSphere);
+  gl.uniformMatrix3fv(normal_uniform, false, normalmatrixSphere);
+
+	
+	var sphere_vao = gl.createVertexArray();
+  gl.bindVertexArray(sphere_vao);
+	gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,
+                new Float32Array(sphere_pos),
+                gl.STATIC_DRAW);
+
+  gl.enableVertexAttribArray(vert_pos_attr);
+  gl.vertexAttribPointer(vert_pos_attr, 3, gl.FLOAT, false, 0, 0);
+  
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,
+                new Float32Array(sphere_pos),
+                gl.STATIC_DRAW);
+
+  gl.enableVertexAttribArray(vert_normal_attr);
+  gl.vertexAttribPointer(vert_normal_attr, 3, gl.FLOAT, false, 0, 0);
+
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer()); 
+
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,
+                new Uint16Array(sphere_faces),
+                gl.STATIC_DRAW);  
+
+
+    gl.drawElements(gl.TRIANGLES,
+                    sphere_faces.length,
+                    gl.UNSIGNED_SHORT,
+                    0);
 
   requestAnimationFrame(draw);
 }
@@ -282,7 +776,7 @@ function draw(time) {
 
 <body onload="initwebgl()">
 
-<canvas id="myGLCanvas" width="500" height="500"></canvas>
+<canvas id="myGLCanvas" width="1000" height="1000"></canvas>
 
 </body>
 </html>
